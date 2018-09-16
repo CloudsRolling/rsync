@@ -1,0 +1,143 @@
+
+构建rsync远程同步
+----------同步源----------------发起端-------------
+192.168.1.1 192.168.1.10
+1、配置IP地址并保证互通
+2、确定备份源
+[root@localhost ~]# mkdir /www
+[root@localhost ~]# touch /www/{1..100}.html
+[root@localhost ~]# rpm -q rsync
+3、创建备份账号文件
+[root@localhost ~]# vim /etc/rsyncd_users.db
+添加：
+han:redhat
+[root@localhost ~]# chmod 600 /etc/rsyncd_users.db //必须设置为600，否则客户端认证失败。
+4、创建rsync配置文件
+[root@localhost ~]# vim /etc/rsyncd.conf //系统中无此文件，需手动创建。
+添加：
+uid = nobody
+gid = nobody
+use chroot = yes
+address = 192.168.56.200
+port 873
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+hosts allow = 192.168.56.0/24
+[www]
+path = /www
+comment = backup
+read only = yes
+dont compress = *.gz *.bz2 *.tgz *.zip *.rar *.z
+auth users = han
+secrets file = /etc/rsyncd_users.db
+5、启动（终止）rsync
+[root@localhost ~]# rsync --daemon
+最好使用：rsync --daemon --config=/etc/rsyncd.conf
+在redhat中，也可以使用xinetd程序管理。
+#vim /etc/xinetd.d/rsync
+将disable改为no
+[root@localhost ~]# netstat -anpt | grep rsync
+[root@localhost ~]# kill -9 PID号（例如：kill -9 9290）
+注意：如果重新启动失败时，先删除pid文件，然后再启动。
+[root@localhost ~]# rm -rf /var/run/rsyncd.pid
+[root@localhost ~]# rsync --daemon
+[root@localhost ~]# netstat -anpt | grep rsync
+6、验证：
+1）本地验证：（类似复制）
+[root@localhost ~]# rsync -rl /etc/httpd/ /tmp/
+2）发起端验证：（ 把同步源的重要文件同步到发起端，作为备份）
+[root@localhost ~]#mkdir /www
+[root@localhost ~]#rsync -avz han@192.168.56.200:：www /www/
+或者
+[root@localhost ~]#rsync -avz rsync://han@192.168.56.200：：www /www/
+增量：
+[root@localhost ~]#rsync -avz --delete han@192.168.56.200:：www /www/
+注：之前学习的内容为下行同步（类似于下载）
+上行同步：（类似于上传）
+[root@localhost ~]# rsync -avz --delete /www han@192.168.56.200:：www
+注意：
+1、同步源中的权限：要把 read only 改写成 no；
+2、同步源中/www/的权限改为757
+7、设置计划任务自动远程同步
+在发起端作如下操作：
+[root@localhost ~]# vim /etc/han.password
+redhat
+[root@localhost ~]# chmod 600 /etc/han.password
+[root@localhost ~]# crontab -e root
+添加：
+30 22 * * * /usr/bin/rsync -az --delete --password-file=/etc/han.password hehe@192.168.56.200::www /www/
+[root@localhost ~]# service crond restart
+[root@localhost ~]# chkconfig crond on
+配置rsync+inotify实时同步（在发起端设置）
+1、调整内核参数
+[root@localhost ~]#cat /proc/sys/fs/inotify/max_queued_events
+[root@localhost ~]#cat /proc/sys/fs/inotify/max_user_instances
+[root@localhost ~]#cat /proc/sys/fs/inotify/max_user_watches
+[root@localhost ~]#vim /etc/sysctl.conf
+添加：
+fs.inotify.max_queued_events = 16384 //事件列队
+fs.inotify.max_user_instances = 1024 //实例数
+fs.inotify.max_user_watches = 1048576 //每个实例文件数量
+[root@localhost ~]#sysctl -p
+2、安装inotify软件
+[root@localhost ~]#tar -zxvf inotify-tools-3.14.tar.gz -C /usr/src/
+[root@localhost ~]#/usr/src/inotify-tools-3.14/
+[root@localhost inotify-tools-3.14]#./configure && make && make install
+3、验证监控效果
+[root@localhost ~]#inotifywait -mrq -e modify,create,move,delete /var/www/html
+在另一个终端上（ctrl+shifs+T）进行增删改查的操作。
+同步源端：
+可以修改上传的目录
+uid = nobody
+gid = nobody
+use chroot = yes
+address = 192.168.56.200
+port = 873
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+hosts allow = 192.168.56.0/24
+[www]
+path = /var/www/html 目录权限为757，其他账户可写。
+comment = hehe
+read only = no
+dont compress = *.gz *.bz2 *.tgz *.zip *.rar *z
+auth users = han
+secrets file = /etc/syncuser.db
+注意：重启服务
+[root@localhost ~]#kill -9 pid
+[root@localhost ~]#rsync --daemon
+4、编写触发式同步脚本
+[root@localhost ~]# vim /etc/han.password
+添加：
+redhat //han用户的密码
+[root@localhost ~]# chmod 600 /etc/han.password
+[root@localhost ~]# vim inotify_rsync.sh
+#!/bin/bash
+INOTIFY="inotifywait -mrq -e modify,create,move,delete /var/www/html/"
+RSYNC="rsync -azH --delete --password-file=/etc/han.passwd /var/www/html han@192.168.56.200::www"
+$INOTIFY | while read DIRECTORY EVENT FILE
+do
+if [ $(pgrep rsync | wc -l) -le 0 ];then
+$RSYNC
+fi
+done
+脚本的另外写法：
+inotifywait -mrq -e modify,create,move,delete /var/www/html/ | while read EVENT
+do
+rsync -azH --delete --password-file=/etc/han.passwd /var/www/html han@192.168.56.200::www
+done
+[root@localhost ~]# inotifywait inotify_rsync.sh &> /dev/null //脚本启动不成功则课启动
+[root@localhost ~]# ./inotifywait.sh &> /dev/null &
+注意：由于时间设置问题，脚本运行时会报错，但不影响使用。
+[root@localhost ~]# jobs //查看后台数据
+[root@localhost ~]# fg 1 //后台转前台
+while read的理解
+#!/bin/bash
+count=1 //赋值语句，不加空格
+cat test | while read line //cat 命令的输出作为read命令的输入,read读到的值放在line中
+do
+echo "Line $count:$line"
+count=$[ $count + 1 ] //注意中括号中的空格。
+done
+echo "finish"
+exit 0
